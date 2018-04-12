@@ -19,7 +19,7 @@ along with The Arduino WiFiEsp library.  If not, see
 #ifndef EspDrv_h
 #define EspDrv_h
 
-#include "Stream.h"
+#include "SoftwareSerial.h"
 #include "IPAddress.h"
 
 
@@ -120,7 +120,7 @@ class EspDrv
 
 public:
 
-    static void wifiDriverInit(Stream *espSerial);
+    static void wifiDriverInit(SoftwareSerial *espSerial);
 
 
     /* Start Wifi connection with passphrase
@@ -286,8 +286,11 @@ public:
 ////////////////////////////////////////////////////////////////////////////////
 
 private:
-	static Stream *espSerial;
+	static SoftwareSerial *espSerial;
+    static long _curr_soft_serial_baund_rate;
+    static bool _soft_serial_started;
 
+    static long _countTrueCommand;
 	static long _bufPos;
 	static uint8_t _connId;
 
@@ -314,11 +317,11 @@ private:
 	// the ring buffer is used to search the tags in the stream
 	static RingBuffer ringBuf;
 
-
+    static void softSerialInit();
 	//static int sendCmd(const char* cmd, int timeout=1000);
-	static int sendCmd(const __FlashStringHelper* cmd, int timeout=1000);
+	static int sendCmd(const __FlashStringHelper* cmd, int timeout=2000);
 	static int sendCmd(const __FlashStringHelper* cmd, int timeout, ...);
-
+	
 	static bool sendCmdGet(const __FlashStringHelper* cmd, const char* startTag, const char* endTag, char* outStr, int outStrLen);
 	static bool sendCmdGet(const __FlashStringHelper* cmd, const __FlashStringHelper* startTag, const __FlashStringHelper* endTag, char* outStr, int outStrLen);
 

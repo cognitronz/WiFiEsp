@@ -44,7 +44,10 @@ typedef enum
 } TagsEnum;
 
 
-Stream *EspDrv::espSerial;
+SoftwareSerial *EspDrv::espSerial;
+long  EspDrv::_countTrueCommand = 0;
+long EspDrv::_curr_soft_serial_baund_rate = 115200;  // make sure esp8266 has default baud rate of 115200
+bool EspDrv::_soft_serial_started = false;
 
 RingBuffer EspDrv::ringBuf(32);
 
@@ -67,22 +70,37 @@ uint16_t EspDrv::_remotePort  =0;
 uint8_t EspDrv::_remoteIp[] = {0};
 
 
-void EspDrv::wifiDriverInit(Stream *espSerial)
+void EspDrv::softSerialInit()
 {
-	LOGDEBUG(F("> wifiDriverInit"));
+  	if (EspDrv::_soft_serial_started == true)
+    	EspDrv::espSerial->end();
+
+	LOGDEBUG1(F("current soft serial baud rate: "), _curr_soft_serial_baund_rate);
+  	EspDrv::espSerial->begin(_curr_soft_serial_baund_rate);
+  	EspDrv::espSerial->println("AT+UART_CUR=9600,8,1,0,1");
+  	delay(1000);
+
+  	EspDrv::espSerial->end();
+  	// Start the software serial for communication with the ESP8266
+  	EspDrv::espSerial->begin(9600);
+  	_curr_soft_serial_baund_rate = 9600;
+  	_soft_serial_started = true;  
+}
+
+void EspDrv::wifiDriverInit(SoftwareSerial *espSerial)
+{
+	char uart_cur[20];
+
+	LOGDEBUG(F("> wifiDriverInit modified"));
 
 	EspDrv::espSerial = espSerial;
+	softSerialInit();
 
 	bool initOK = false;
 	
-	for(int i=0; i<5; i++)
+	if (sendCmd(F("AT")) == TAG_OK)
 	{
-		if (sendCmd(F("AT")) == TAG_OK)
-		{
-			initOK=true;
-			break;
-		}
-		delay(1000);
+		initOK=true;
 	}
 
 	if (!initOK)
@@ -91,8 +109,11 @@ void EspDrv::wifiDriverInit(Stream *espSerial)
 		delay(5000);
 		return;
 	}
+	
+	// reset();
+	sendCmdGet(F("AT+UART_CUR?"), F("UART_CUR:"), F("\r\n"), uart_cur, sizeof(uart_cur));
+	LOGWARN1(F("+UART_CUR: "), uart_cur);
 
-	reset();
 
 	// check firmware version
 	getFwVersion();
@@ -108,16 +129,6 @@ void EspDrv::wifiDriverInit(Stream *espSerial)
 	{
 		LOGINFO1(F("Initilization successful -"), fwVersion);
 	}
-}
-
-
-void EspDrv::reset()
-{
-	LOGDEBUG(F("> reset"));
-
-	sendCmd(F("AT+RST"));
-	delay(3000);
-	espEmptyBuf(false);  // empty dirty characters from the buffer
 
 	// disable echo of commands
 	sendCmd(F("ATE0"));
@@ -137,10 +148,24 @@ void EspDrv::reset()
 	sendCmd(F("AT+CWAUTOCONN=0"));
 
 	// enable DHCP
-	sendCmd(F("AT+CWDHCP=1,1"));
+	sendCmd(F("AT+CWDHCP_CUR=1,1"));
+	// sendCmd(F("AT+CIPSTA_CUR=\"192.168.1.100\""));
 	delay(200);
 }
 
+
+void EspDrv::reset()
+{
+	LOGDEBUG(F("> reset"));
+
+	sendCmd(F("AT+RST"));
+	// set baud rate back to default 115200.
+	_curr_soft_serial_baund_rate = 115200;
+	delay(3000);
+
+	softSerialInit();
+	espEmptyBuf(false);  // empty dirty characters from the buffer
+}
 
 
 bool EspDrv::wifiConnect(const char* ssid, const char* passphrase)
@@ -154,7 +179,7 @@ bool EspDrv::wifiConnect(const char* ssid, const char* passphrase)
     // connect to access point, use CUR mode to avoid connection at boot
 	int ret = sendCmd(F("AT+CWJAP_CUR=\"%s\",\"%s\""), 20000, ssid, passphrase);
 
-	if (ret==TAG_OK)
+	if (ret==TAG_OK || ret==TAG_CONNECT)
 	{
 		LOGINFO1(F("Connected to"), ssid);
 		return true;
@@ -381,7 +406,7 @@ void EspDrv::getIpAddressAP(IPAddress& ip)
 	LOGDEBUG(F("> getIpAddressAP"));
 
 	char buf[20];
-	if (sendCmdGet(F("AT+CIPAP?"), F("+CIPAP:ip:\""), F("\""), buf, sizeof(buf)))
+	if (sendCmdGet(F("AT+CIPAP_CUR?"), F("+CIPAP_CUR:ip:\""), F("\""), buf, sizeof(buf)))
 	{
 		char* token;
 
@@ -417,7 +442,7 @@ uint8_t* EspDrv::getCurrentBSSID()
 	memset(_bssid, 0, WL_MAC_ADDR_LENGTH);
 
 	char buf[20];
-	if (sendCmdGet(F("AT+CWJAP?"), F(",\""), F("\","), buf, sizeof(buf)))
+	if (sendCmdGet(F("AT+CWJAP_CUR?"), F(",\""), F("\","), buf, sizeof(buf)))
 	{
 		char* token;
 
@@ -444,7 +469,7 @@ int32_t EspDrv::getCurrentRSSI()
 
     int ret=0;
 	char buf[10];
-	sendCmdGet(F("AT+CWJAP?"), F(",-"), F("\r\n"), buf, sizeof(buf));
+	sendCmdGet(F("AT+CWJAP_CUR?"), F(",-"), F("\r\n"), buf, sizeof(buf));
 
 	if (isDigit(buf[0])) {
       ret = -atoi(buf);
@@ -621,7 +646,7 @@ bool EspDrv::startClient(const char* host, uint16_t port, uint8_t sock, uint8_t 
 	else if (protMode==UDP_MODE)
 		ret = sendCmd(F("AT+CIPSTART=%d,\"UDP\",\"%s\",0,%u,2"), 5000, sock, host, port);
 
-	return ret==TAG_OK;
+	return (ret==TAG_OK) || (ret==TAG_CONNECT);
 }
 
 
@@ -811,10 +836,10 @@ bool EspDrv::sendData(uint8_t sock, const uint8_t *data, uint16_t len)
 
 	espSerial->write(data, len);
 
-	idx = readUntil(2000);
+	idx = readUntil(4000);
 	if(idx!=TAG_SENDOK)
 	{
-		LOGERROR(F("Data packet send error (2)"));
+		LOGERROR1(F("Data packet send error (2)..."), idx);
 		return false;
 	}
 
@@ -854,7 +879,7 @@ bool EspDrv::sendData(uint8_t sock, const __FlashStringHelper *data, uint16_t le
 	idx = readUntil(2000);
 	if(idx!=TAG_SENDOK)
 	{
-		LOGERROR(F("Data packet send error (2)"));
+		LOGERROR1(F("Data packet send error (2)..."), idx);
 		return false;
 	}
 
@@ -883,7 +908,7 @@ bool EspDrv::sendDataUdp(uint8_t sock, const char* host, uint16_t port, const ui
 	idx = readUntil(2000);
 	if(idx!=TAG_SENDOK)
 	{
-		LOGERROR(F("Data packet send error (2)"));
+		LOGERROR1(F("Data packet send error (2)..."), idx);
 		return false;
 	}
 
@@ -938,7 +963,7 @@ bool EspDrv::sendCmdGet(const __FlashStringHelper* cmd, const char* startTag, co
 		ringBuf.init();
 
 		// start tag found, search the endTag
-		idx = readUntil(500, endTag);
+		idx = readUntil(2000, endTag);
 
 		if(idx==NUMESPTAGS)
 		{
@@ -991,21 +1016,23 @@ bool EspDrv::sendCmdGet(const __FlashStringHelper* cmd, const __FlashStringHelpe
 */
 int EspDrv::sendCmd(const __FlashStringHelper* cmd, int timeout)
 {
-    espEmptyBuf();
+	int idx = -1;
+	int countTimeCommand = 0; 
+	int maxTime = 5;
 
+    espEmptyBuf();
 	LOGDEBUG(F("----------------------------------------------"));
 	LOGDEBUG1(F(">>"), cmd);
 
 	espSerial->println(cmd);
 
-	int idx = readUntil(timeout);
+	idx = readUntil(timeout);
 
 	LOGDEBUG1(F("---------------------------------------------- >"), idx);
 	LOGDEBUG();
 
     return idx;
 }
-
 
 /*
 * Sends the AT command and returns the id of the TAG.
@@ -1015,20 +1042,23 @@ int EspDrv::sendCmd(const __FlashStringHelper* cmd, int timeout)
 int EspDrv::sendCmd(const __FlashStringHelper* cmd, int timeout, ...)
 {
 	char cmdBuf[CMD_BUFFER_SIZE];
+	int countTimeCommand = 0; 
+	int maxTime = 5;
+	int idx = -1;
 
 	va_list args;
 	va_start (args, timeout);
 	vsnprintf_P (cmdBuf, CMD_BUFFER_SIZE, (char*)cmd, args);
 	va_end (args);
 
-	espEmptyBuf();
+	espEmptyBuf(true);
 
 	LOGDEBUG(F("----------------------------------------------"));
 	LOGDEBUG1(F(">>"), cmdBuf);
 
 	espSerial->println(cmdBuf);
 
-	int idx = readUntil(timeout);
+	idx = readUntil(timeout);
 
 	LOGDEBUG1(F("---------------------------------------------- >"), idx);
 	LOGDEBUG();
@@ -1051,29 +1081,30 @@ int EspDrv::readUntil(int timeout, const char* tag, bool findTags)
 
 	while ((millis() - start < timeout) and ret<0)
 	{
-        if(espSerial->available())
+        if(espSerial->available() > 0)
 		{
             c = (char)espSerial->read();
 			LOGDEBUG0(c);
 			ringBuf.push(c);
 
-			if (tag!=NULL)
+		}
+		if (tag!=NULL)
+		{
+			if (ringBuf.endsWith(tag))
 			{
-				if (ringBuf.endsWith(tag))
-				{
-					ret = NUMESPTAGS;
-					//LOGDEBUG1("xxx");
-				}
+				ret = NUMESPTAGS;
+                LOGDEBUG("... found");
+				break;
 			}
-			if(findTags)
+		}
+		if(findTags)
+		{
+			for(int i=0; i<NUMESPTAGS; i++)
 			{
-				for(int i=0; i<NUMESPTAGS; i++)
+				if (ringBuf.endsWith(ESPTAGS[i]))
 				{
-					if (ringBuf.endsWith(ESPTAGS[i]))
-					{
-						ret = i;
-						break;
-					}
+					ret = i;
+					break;
 				}
 			}
 		}
